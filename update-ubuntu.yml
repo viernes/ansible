@@ -1,0 +1,28 @@
+---
+- name: Actualizar Ubuntu 26.04
+  hosts: ubuntu
+  become: true
+  serial: 1            # un servidor a la vez, por si hay reinicio
+  tasks:
+    - name: Esperar a que se libere el lock de apt
+      ansible.builtin.shell: while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do sleep 5; done
+      changed_when: false
+
+    - name: Actualizar caché y paquetes
+      ansible.builtin.apt:
+        update_cache: true
+        upgrade: dist
+        autoremove: true
+        autoclean: true
+      environment:
+        NEEDRESTART_MODE: a   # evita que needrestart pregunte
+
+    - name: ¿Hace falta reiniciar?
+      ansible.builtin.stat:
+        path: /var/run/reboot-required
+      register: reboot_required
+
+    - name: Reiniciar si es necesario
+      ansible.builtin.reboot:
+        reboot_timeout: 600
+      when: reboot_required.stat.exists
