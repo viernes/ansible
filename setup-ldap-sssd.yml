@@ -19,7 +19,7 @@
   vars:
     # --- Servidor Authentik (outpost LDAP) ---
     authentik_ldap_host: auth.xmarts.com
-    authentik_ldap_uri: "ldap://{{ authentik_ldap_host }}"
+    authentik_ldap_uri: "ldaps://{{ authentik_ldap_host }}:636"
     authentik_base_dn: "dc=ldap,dc=xmarts,dc=com"
     authentik_bind_dn: "cn=ldapservice,ou=users,{{ authentik_base_dn }}"
     # authentik_bind_password: NO se define aquí. Viene de un secreto de
@@ -100,7 +100,8 @@
     - name: Verificar que el puerto LDAP de Authentik responda
       ansible.builtin.wait_for:
         host: "{{ authentik_ldap_host }}"
-        port: "{{ authentik_ldap_uri | regex_search(':(\\d+)$', '\\1') | first | int }}"
+        # Puerto de la URI; si no trae, 636 para ldaps:// y 389 para ldap://
+        port: "{{ (authentik_ldap_uri | regex_search(':(\\d+)/?$', '\\1') or ['636' if authentik_ldap_uri.startswith('ldaps') else '389']) | first | int }}"
         timeout: 10
 
     # ---------- SSSD ----------
