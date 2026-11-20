@@ -22,7 +22,7 @@
     authentik_ldap_uri: "ldaps://{{ authentik_ldap_host }}:636"
     authentik_base_dn: "dc=ldap,dc=xmarts,dc=com"
     authentik_bind_dn: "cn=ldapservice,ou=users,{{ authentik_base_dn }}"
-    authentik_bind_password: {{ authentik_bind_password }}
+    authentik_bind_password: "{{ authentik_bind_password }}"
 
     # --- TLS ---
     # Ruta LOCAL (en la máquina de Ansible) al certificado de la CA que firmó
