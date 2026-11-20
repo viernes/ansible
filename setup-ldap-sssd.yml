@@ -8,7 +8,7 @@
 #   - Usuarios con uidNumber/gidNumber (Authentik los genera solo).
 #
 # Uso:
-#   ansible-vault create group_vars/ubuntu/vault.yml
+#   ansible-vault create group_vars/ubuntu/.yml
 #     -> authentik_bind_password: "..."
 #   ansible-playbook -i inventario setup-ldap-sssd.yml --ask-vault-pass
 #
@@ -18,11 +18,11 @@
 
   vars:
     # --- Servidor Authentik (outpost LDAP) ---
-    authentik_ldap_host: ldap.example.com
+    authentik_ldap_host: auth.xmarts.com
     authentik_ldap_uri: "ldaps://{{ authentik_ldap_host }}:636"
-    authentik_base_dn: "dc=ldap,dc=goauthentik,dc=io"
+    authentik_base_dn: "dc=ldap,dc=xmarts,dc=com"
     authentik_bind_dn: "cn=ldapservice,ou=users,{{ authentik_base_dn }}"
-    # authentik_bind_password: viene de ansible-vault (obligatoria)
+    authentik_bind_password: {{ authentik_bind_password }}
 
     # --- TLS ---
     # Ruta LOCAL (en la máquina de Ansible) al certificado de la CA que firmó
@@ -58,7 +58,7 @@
         that:
           - authentik_bind_password is defined
           - authentik_bind_password | length > 0
-        fail_msg: "Define authentik_bind_password (idealmente con ansible-vault)."
+        fail_msg: "Define authentik_bind_password (idealmente con ansible-vault). {{ authentik_bind_password }}"
         quiet: true
 
   tasks:
