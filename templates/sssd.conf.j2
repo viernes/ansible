@@ -1,0 +1,56 @@
+# {{ ansible_managed }}
+[sssd]
+config_file_version = 2
+services = nss, pam{{ ', ssh' if ldap_ssh_keys_from_ldap else '' }}
+domains = {{ sssd_domain }}
+
+[nss]
+filter_users = root
+filter_groups = root
+
+[pam]
+offline_credentials_expiration = 7
+
+[domain/{{ sssd_domain }}]
+id_provider = ldap
+auth_provider = ldap
+# Authentik no permite cambiar la contraseña por LDAP
+chpass_provider = none
+{% if ldap_access_group | length > 0 %}
+access_provider = ldap
+ldap_access_order = filter
+ldap_access_filter = memberOf=cn={{ ldap_access_group }},ou=groups,{{ authentik_base_dn }}
+{% else %}
+access_provider = permit
+{% endif %}
+
+ldap_uri = {{ authentik_ldap_uri }}
+ldap_tls_reqcert = {{ authentik_tls_reqcert }}
+ldap_tls_cacert = /etc/ssl/certs/ca-certificates.crt
+
+ldap_default_bind_dn = {{ authentik_bind_dn }}
+ldap_default_authtok_type = password
+ldap_default_authtok = {{ authentik_bind_password }}
+
+# Esquema que expone Authentik
+ldap_schema = rfc2307bis
+ldap_search_base = {{ authentik_base_dn }}
+ldap_user_search_base = ou=users,{{ authentik_base_dn }}
+ldap_group_search_base = {{ authentik_base_dn }}
+ldap_user_object_class = user
+ldap_user_name = cn
+ldap_group_object_class = group
+ldap_group_name = cn
+ldap_group_member = member
+{% if ldap_ssh_keys_from_ldap %}
+ldap_user_ssh_public_key = sshPublicKey
+{% endif %}
+
+# Authentik entrega uidNumber/gidNumber propios (desde 2000 por defecto)
+ldap_id_mapping = false
+min_id = 1000
+
+cache_credentials = {{ sssd_cache_credentials | bool }}
+enumerate = false
+fallback_homedir = /home/%u
+default_shell = {{ sssd_default_shell }}

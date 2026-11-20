@@ -1,0 +1,233 @@
+---
+# Login de usuarios LDAP (Authentik) en Ubuntu 26.10 con SSSD.
+#
+# Requisitos en Authentik:
+#   - Un Provider LDAP + Application + Outpost LDAP desplegado.
+#   - Un usuario de servicio (p. ej. "ldapservice") con permiso
+#     "Search full LDAP directory" en el provider.
+#   - Usuarios con uidNumber/gidNumber (Authentik los genera solo).
+#
+# Uso:
+#   ansible-vault create group_vars/ubuntu/vault.yml
+#     -> authentik_bind_password: "..."
+#   ansible-playbook -i inventario setup-ldap-sssd.yml --ask-vault-pass
+#
+- name: Configurar login LDAP (Authentik) con SSSD
+  hosts: ubuntu
+  become: true
+
+  vars:
+    # --- Servidor Authentik (outpost LDAP) ---
+    authentik_ldap_host: ldap.example.com
+    authentik_ldap_uri: "ldaps://{{ authentik_ldap_host }}:636"
+    authentik_base_dn: "dc=ldap,dc=goauthentik,dc=io"
+    authentik_bind_dn: "cn=ldapservice,ou=users,{{ authentik_base_dn }}"
+    # authentik_bind_password: viene de ansible-vault (obligatoria)
+
+    # --- TLS ---
+    # Ruta LOCAL (en la máquina de Ansible) al certificado de la CA que firmó
+    # el certificado del outpost. Vacío = usar las CA del sistema.
+    authentik_ca_cert_src: ""
+    # demand | hard | allow | never  (never solo para pruebas)
+    authentik_tls_reqcert: demand
+
+    # --- Acceso ---
+    # Grupo de Authentik cuyos miembros pueden iniciar sesión.
+    # Vacío = cualquier usuario del directorio puede entrar.
+    ldap_access_group: "consultant"
+    # Grupo de Authentik con sudo. Vacío = no se crea regla de sudo.
+    # Usar nombres sin espacios.
+    ldap_sudo_group: "linux-admins"
+
+    # --- SSH ---
+    # Permitir login por SSH con contraseña de Authentik.
+    ldap_ssh_password_auth: true
+    # Tomar llaves SSH del atributo sshPublicKey del usuario en Authentik.
+    ldap_ssh_keys_from_ldap: false
+
+    # --- Varios ---
+    sssd_domain: xmarts
+    sssd_cache_credentials: true
+    sssd_default_shell: /bin/bash
+    # Usuario para probar al final con `getent passwd` (vacío = no probar).
+    ldap_test_user: ""
+
+  pre_tasks:
+    - name: Verificar que la contraseña de bind esté definida
+      ansible.builtin.assert:
+        that:
+          - authentik_bind_password is defined
+          - authentik_bind_password | length > 0
+        fail_msg: "Define authentik_bind_password (idealmente con ansible-vault)."
+        quiet: true
+
+  tasks:
+    - name: Esperar a que se libere el lock de apt
+      ansible.builtin.shell: while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do sleep 5; done
+      changed_when: false
+
+    - name: Instalar paquetes de SSSD/LDAP
+      ansible.builtin.apt:
+        name:
+          - sssd
+          - sssd-ldap
+          - sssd-tools
+          - libnss-sss
+          - libpam-sss
+          - ldap-utils
+          - ca-certificates
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+      environment:
+        NEEDRESTART_MODE: a
+
+    # ---------- TLS ----------
+    - name: Instalar la CA del outpost de Authentik
+      ansible.builtin.copy:
+        src: "{{ authentik_ca_cert_src }}"
+        dest: /usr/local/share/ca-certificates/authentik-ldap.crt
+        owner: root
+        group: root
+        mode: "0644"
+      when: authentik_ca_cert_src | length > 0
+      notify: Actualizar almacén de certificados
+
+    - name: Aplicar la CA antes de hablar con LDAP
+      ansible.builtin.meta: flush_handlers
+
+    - name: Verificar que el puerto LDAP de Authentik responda
+      ansible.builtin.wait_for:
+        host: "{{ authentik_ldap_host }}"
+        port: "{{ authentik_ldap_uri | regex_search(':(\\d+)$', '\\1') | first | int }}"
+        timeout: 10
+
+    # ---------- SSSD ----------
+    # sssd >= 2.10 puede correr como usuario sin privilegios "sssd"; en ese caso
+    # el archivo debe ser legible por su grupo. Si no, root:root 0600.
+    - name: ¿Existe el grupo sssd?
+      ansible.builtin.getent:
+        database: group
+        key: sssd
+        fail_key: false
+
+    - name: Escribir /etc/sssd/sssd.conf
+      ansible.builtin.template:
+        src: templates/sssd.conf.j2
+        dest: /etc/sssd/sssd.conf
+        owner: root
+        group: "{{ 'sssd' if (ansible_facts.getent_group.sssd | default(none)) else 'root' }}"
+        mode: "{{ '0640' if (ansible_facts.getent_group.sssd | default(none)) else '0600' }}"
+      no_log: true   # el archivo contiene la contraseña de bind
+      notify: Reiniciar sssd
+
+    - name: Validar configuración de SSSD
+      ansible.builtin.command: sssctl config-check
+      changed_when: false
+
+    - name: Habilitar e iniciar sssd
+      ansible.builtin.systemd_service:
+        name: sssd
+        enabled: true
+        state: started
+
+    # ---------- NSS ----------
+    - name: Asegurar "sss" en nsswitch.conf
+      ansible.builtin.replace:
+        path: /etc/nsswitch.conf
+        regexp: '^({{ item }}:(?!.*\bsss\b).*?)\s*$'
+        replace: '\1 sss'
+      loop:
+        - passwd
+        - group
+        - shadow
+      notify: Reiniciar sssd
+
+    # ---------- PAM ----------
+    - name: ¿pam_sss y pam_mkhomedir ya están activos?
+      ansible.builtin.shell: grep -q pam_sss.so /etc/pam.d/common-auth && grep -q pam_mkhomedir.so /etc/pam.d/common-session
+      register: pam_check
+      changed_when: false
+      failed_when: false
+
+    - name: Activar SSSD y creación de home en PAM
+      ansible.builtin.command: pam-auth-update --enable sss mkhomedir --package
+      when: pam_check.rc != 0
+      changed_when: true
+
+    # ---------- sudo ----------
+    - name: Dar sudo al grupo de Authentik
+      ansible.builtin.copy:
+        dest: /etc/sudoers.d/50-ldap-sudo
+        content: |
+          # Gestionado por Ansible
+          %{{ ldap_sudo_group }} ALL=(ALL:ALL) ALL
+        owner: root
+        group: root
+        mode: "0440"
+        validate: visudo -cf %s
+      when: ldap_sudo_group | length > 0
+
+    - name: Quitar regla de sudo si no hay grupo definido
+      ansible.builtin.file:
+        path: /etc/sudoers.d/50-ldap-sudo
+        state: absent
+      when: ldap_sudo_group | length == 0
+
+    # ---------- SSH ----------
+    # OpenSSH aplica el PRIMER valor que encuentra, por eso el prefijo 10-
+    # gana sobre 50-cloud-init.conf (que suele poner PasswordAuthentication no).
+    - name: Configurar sshd para usuarios LDAP
+      ansible.builtin.copy:
+        dest: /etc/ssh/sshd_config.d/10-ldap-sssd.conf
+        content: |
+          # Gestionado por Ansible
+          UsePAM yes
+          # Login por llave siempre activo (lo usa Ansible y los usuarios locales)
+          PubkeyAuthentication yes
+          AuthorizedKeysFile .ssh/authorized_keys .ssh/authorized_keys2
+          KbdInteractiveAuthentication {{ 'yes' if ldap_ssh_password_auth else 'no' }}
+          PasswordAuthentication {{ 'yes' if ldap_ssh_password_auth else 'no' }}
+          {% if ldap_ssh_keys_from_ldap %}
+          AuthorizedKeysCommand /usr/bin/sss_ssh_authorizedkeys
+          AuthorizedKeysCommandUser nobody
+          {% endif %}
+        owner: root
+        group: root
+        mode: "0644"
+        validate: sshd -t -f %s
+      notify: Recargar ssh
+
+  handlers:
+    - name: Actualizar almacén de certificados
+      ansible.builtin.command: update-ca-certificates
+      changed_when: true
+
+    - name: Reiniciar sssd
+      ansible.builtin.shell: |
+        sss_cache -E || true
+        systemctl restart sssd
+      changed_when: true
+
+    - name: Recargar ssh
+      ansible.builtin.systemd_service:
+        name: ssh
+        state: reloaded
+
+  post_tasks:
+    - name: Aplicar handlers antes de probar
+      ansible.builtin.meta: flush_handlers
+
+    - name: Probar que se resuelve el usuario LDAP de prueba
+      ansible.builtin.command: "getent passwd {{ ldap_test_user }}"
+      register: getent_test
+      changed_when: false
+      retries: 3
+      delay: 5
+      until: getent_test.rc == 0
+      when: ldap_test_user | length > 0
+
+    - name: Resultado de la prueba
+      ansible.builtin.debug:
+        var: getent_test.stdout
+      when: ldap_test_user | length > 0
