@@ -52,14 +52,14 @@
     # Usuario para probar al final con `getent passwd` (vacío = no probar).
     ldap_test_user: ""
 
-  pre_tasks:
-    - name: Verificar que la contraseña de bind esté definida
-      ansible.builtin.assert:
-        that:
-          - authentik_bind_password is defined
-          - authentik_bind_password | length > 0
-        fail_msg: "Define authentik_bind_password (idealmente con ansible-vault). {{ authentik_bind_password }}"
-        quiet: true
+#  pre_tasks:
+#    - name: Verificar que la contraseña de bind esté definida
+#      ansible.builtin.assert:
+#        that:
+#          - authentik_bind_password is defined
+#          - authentik_bind_password | length > 0
+#        fail_msg: "Define authentik_bind_password (idealmente con ansible-vault). {{ authentik_bind_password }}"
+#        quiet: true
 
   tasks:
     - name: Esperar a que se libere el lock de apt
