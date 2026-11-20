@@ -19,7 +19,7 @@
   vars:
     # --- Servidor Authentik (outpost LDAP) ---
     authentik_ldap_host: auth.xmarts.com
-    authentik_ldap_uri: "ldaps://{{ authentik_ldap_host }}:636"
+    authentik_ldap_uri: "ldap://{{ authentik_ldap_host }}"
     authentik_base_dn: "dc=ldap,dc=xmarts,dc=com"
     authentik_bind_dn: "cn=ldapservice,ou=users,{{ authentik_base_dn }}"
     # authentik_bind_password: NO se define aquí. Viene de un secreto de
