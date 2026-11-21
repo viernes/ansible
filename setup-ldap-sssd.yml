@@ -1,5 +1,5 @@
 ---
-# Login de usuarios LDAP (Authentik) en Ubuntu 26.10 con SSSD.
+# Login de usuarios LDAP (Authentik) en Ubuntu 26.04 con SSSD.
 #
 # Requisitos en Authentik:
 #   - Un Provider LDAP + Application + Outpost LDAP desplegado.
