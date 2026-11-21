@@ -1,0 +1,117 @@
+---
+# Configuración básica de Ubuntu: DNS, hostname, zona horaria y NTP.
+#
+# Ubuntu usa systemd-resolved, así que el DNS se pone con un drop-in en
+# /etc/systemd/resolved.conf.d/ en lugar de editar /etc/resolv.conf
+# (ese archivo es un symlink que resolved regenera).
+#
+# Uso:
+#   ansible-playbook -i inventario config-basica.yml
+#   ansible-playbook -i inventario config-basica.yml --tags dns   # solo DNS
+#
+- name: Configuración básica de servidores Ubuntu
+  hosts: ubuntu
+  become: true
+
+  vars:
+    # --- DNS ---
+    dns_servers:
+      - 1.1.1.1
+      - 8.8.8.8
+    dns_fallback_servers:
+      - 9.9.9.9
+    # Dominios de búsqueda (p. ej. para resolver "srv1" como "srv1.xmarts.com").
+    dns_search_domains:
+      - xmarts.com
+    # true = ignorar los DNS que entregue DHCP y usar solo los de arriba.
+    dns_ignore_dhcp: true
+
+    # --- Hostname (vacío = no cambiarlo) ---
+    # Se puede definir por host en el inventario: srv1 new_hostname=srv1
+    new_hostname: ""
+
+    # --- Hora ---
+    timezone: America/Mexico_City
+    ntp_servers:
+      - 0.pool.ntp.org
+      - 1.pool.ntp.org
+
+  handlers:
+    - name: Reiniciar systemd-resolved
+      ansible.builtin.systemd:
+        name: systemd-resolved
+        state: restarted
+
+    - name: Reiniciar timesyncd
+      ansible.builtin.systemd:
+        name: systemd-timesyncd
+        state: restarted
+
+  tasks:
+    # ---------------- DNS ----------------
+    - name: Crear carpeta de drop-ins de resolved
+      ansible.builtin.file:
+        path: /etc/systemd/resolved.conf.d
+        state: directory
+        mode: "0755"
+      tags: dns
+
+    - name: Configurar servidores DNS
+      ansible.builtin.copy:
+        dest: /etc/systemd/resolved.conf.d/10-dns.conf
+        mode: "0644"
+        content: |
+          # Administrado por Ansible
+          [Resolve]
+          DNS={{ dns_servers | join(' ') }}
+          FallbackDNS={{ dns_fallback_servers | join(' ') }}
+          Domains={{ dns_search_domains | join(' ') }}{{ ' ~.' if dns_ignore_dhcp else '' }}
+      notify: Reiniciar systemd-resolved
+      tags: dns
+
+    # ---------------- Hostname ----------------
+    - name: Poner hostname
+      ansible.builtin.hostname:
+        name: "{{ new_hostname }}"
+      when: new_hostname | length > 0
+      tags: hostname
+
+    - name: Reflejar hostname en /etc/hosts
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        regexp: '^127\.0\.1\.1\s'
+        line: "127.0.1.1 {{ new_hostname }}"
+      when: new_hostname | length > 0
+      tags: hostname
+
+    # ---------------- Hora ----------------
+    - name: Poner zona horaria
+      community.general.timezone:
+        name: "{{ timezone }}"
+      tags: time
+
+    - name: Configurar NTP
+      ansible.builtin.copy:
+        dest: /etc/systemd/timesyncd.conf
+        mode: "0644"
+        content: |
+          # Administrado por Ansible
+          [Time]
+          NTP={{ ntp_servers | join(' ') }}
+      notify: Reiniciar timesyncd
+      tags: time
+
+  post_tasks:
+    - name: Aplicar handlers antes de verificar
+      ansible.builtin.meta: flush_handlers
+
+    - name: Verificar DNS
+      ansible.builtin.command: resolvectl status
+      register: dns_status
+      changed_when: false
+      tags: dns
+
+    - name: Mostrar DNS activos
+      ansible.builtin.debug:
+        msg: "{{ dns_status.stdout_lines | select('search', 'DNS Servers|DNS Domain') | list }}"
+      tags: dns
