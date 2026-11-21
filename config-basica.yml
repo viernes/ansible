@@ -47,6 +47,11 @@
         name: systemd-timesyncd
         state: restarted
 
+    - name: Reiniciar chrony
+      ansible.builtin.systemd:
+        name: chrony
+        state: restarted
+
   tasks:
     # ---------------- DNS ----------------
     - name: Crear carpeta de drop-ins de resolved
@@ -90,7 +95,26 @@
         name: "{{ timezone }}"
       tags: time
 
-    - name: Configurar NTP
+    # Ubuntu 25.10+ (y 26.04) usa chrony en vez de systemd-timesyncd.
+    # Se configura el que esté instalado.
+    - name: Detectar servicios de hora
+      ansible.builtin.service_facts:
+      tags: time
+
+    - name: Configurar NTP (chrony)
+      ansible.builtin.copy:
+        dest: /etc/chrony/sources.d/ansible.sources
+        mode: "0644"
+        content: |
+          # Administrado por Ansible
+          {% for s in ntp_servers %}
+          server {{ s }} iburst
+          {% endfor %}
+      notify: Reiniciar chrony
+      when: "'chrony.service' in ansible_facts.services"
+      tags: time
+
+    - name: Configurar NTP (systemd-timesyncd)
       ansible.builtin.copy:
         dest: /etc/systemd/timesyncd.conf
         mode: "0644"
@@ -99,6 +123,9 @@
           [Time]
           NTP={{ ntp_servers | join(' ') }}
       notify: Reiniciar timesyncd
+      when:
+        - "'chrony.service' not in ansible_facts.services"
+        - "'systemd-timesyncd.service' in ansible_facts.services"
       tags: time
 
   post_tasks:
