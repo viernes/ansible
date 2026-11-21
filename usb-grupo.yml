@@ -1,0 +1,111 @@
+---
+# Solo los miembros del grupo "usb" pueden montar memorias/discos USB.
+#
+# En el escritorio, las memorias USB las monta udisks2 a nombre del usuario
+# (automontaje de GNOME, Nautilus, `udisksctl mount`) y udisks2 pide permiso a
+# polkit. Esta regla de polkit deja montar solo al grupo "usb"; al resto se le
+# niega sin pedir contraseña. Quien monta, monta con escritura.
+#
+# Funciona igual si "usb" es un grupo local o un grupo de LDAP/Authentik
+# resuelto por SSSD (polkit usa los grupos que devuelve NSS).
+#
+# Uso:
+#   ansible-playbook -i inventario usb-grupo.yml
+#   ansible-playbook -i inventario usb-grupo.yml -e '{"usb_users": ["ana", "luis"]}'
+#
+# Para quitar la restricción:
+#   ansible-playbook -i inventario usb-grupo.yml -e usb_restrict=false
+#
+- name: Restringir el montaje de USB al grupo usb
+  hosts: ubuntu
+  become: true
+
+  vars:
+    # Grupo cuyos miembros pueden montar USB.
+    usb_group: usb
+    # true = crear el grupo local. Poner false si el grupo viene de LDAP
+    # (Authentik), para no tener un grupo local con el mismo nombre.
+    usb_create_local_group: true
+    # Usuarios locales a agregar al grupo (se agregan, no se quita a nadie).
+    usb_users: []
+    # false = borrar la regla y volver al comportamiento normal de Ubuntu.
+    usb_restrict: true
+
+    usb_polkit_rule: /etc/polkit-1/rules.d/49-usb-solo-grupo.rules
+
+  tasks:
+    - name: Instalar udisks2 y polkit
+      ansible.builtin.apt:
+        name:
+          - udisks2
+          - polkitd
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+      when: usb_restrict
+
+    - name: Crear el grupo local {{ usb_group }}
+      ansible.builtin.group:
+        name: "{{ usb_group }}"
+        state: present
+        system: true
+      when: usb_restrict and usb_create_local_group
+
+    - name: Agregar usuarios al grupo {{ usb_group }}
+      ansible.builtin.user:
+        name: "{{ item }}"
+        groups: "{{ usb_group }}"
+        append: true
+      loop: "{{ usb_users }}"
+      when: usb_restrict
+
+    # polkit relee rules.d solo cuando cambia algo; no hace falta reiniciarlo.
+    - name: Regla de polkit para montar USB
+      ansible.builtin.copy:
+        dest: "{{ usb_polkit_rule }}"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          // Administrado por Ansible (usb-grupo.yml). No editar a mano.
+          // Solo el grupo "{{ usb_group }}" puede montar o desbloquear discos
+          // extraíbles (USB) con udisks2. Al resto se le niega sin preguntar.
+          polkit.addRule(function(action, subject) {
+              var acciones = [
+                  "org.freedesktop.udisks2.filesystem-mount",
+                  "org.freedesktop.udisks2.filesystem-mount-other-seat",
+                  "org.freedesktop.udisks2.filesystem-mount-system",
+                  "org.freedesktop.udisks2.filesystem-fstab",
+                  "org.freedesktop.udisks2.encrypted-unlock",
+                  "org.freedesktop.udisks2.encrypted-unlock-other-seat",
+                  "org.freedesktop.udisks2.encrypted-unlock-system",
+                  "org.freedesktop.udisks2.loop-setup",
+                  "org.freedesktop.udisks2.modify-device",
+                  "org.freedesktop.udisks2.modify-device-other-seat",
+                  "org.freedesktop.udisks2.modify-device-system"
+              ];
+              if (acciones.indexOf(action.id) < 0) {
+                  return polkit.Result.NOT_HANDLED;
+              }
+              if (subject.user == "root") {
+                  return polkit.Result.NOT_HANDLED;
+              }
+              if (subject.isInGroup("{{ usb_group }}")) {
+                  return polkit.Result.YES;
+              }
+              return polkit.Result.NO;
+          });
+      when: usb_restrict
+
+    - name: Quitar la regla de polkit
+      ansible.builtin.file:
+        path: "{{ usb_polkit_rule }}"
+        state: absent
+      when: not usb_restrict
+
+    - name: Comprobar que el grupo {{ usb_group }} existe (local o LDAP)
+      ansible.builtin.getent:
+        database: group
+        key: "{{ usb_group }}"
+      changed_when: false
+      when: usb_restrict
